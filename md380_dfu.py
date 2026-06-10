@@ -51,7 +51,7 @@ def download(dfu, data, flash_address):
         while len(data) > 0:
             packet, data = data[:block_size], data[block_size:]
             if len(packet) < block_size:
-                packet += '\xFF' * (block_size - len(packet))
+                packet += b'\xff' * (block_size - len(packet))
             dfu.download(block_number, packet)
             status, timeout, state, discarded = dfu.get_status()
             sys.stdout.write('.')
@@ -95,7 +95,7 @@ def download_codeplug(dfu, data):
         while len(data) > 0:
             packet, data = data[:block_size], data[block_size:]
             if len(packet) < block_size:
-                packet += '\xFF' * (block_size - len(packet))
+                packet += b'\xff' * (block_size - len(packet))
             dfu.download(block_number, packet)
             state = 11
             while state != State.dfuDNLOAD_IDLE:
@@ -190,72 +190,68 @@ def upload_codeplug(dfu, filename):
         print("Done.")
 
 
+BOOTLOADER_STRINGS = ('AnyRoad Technology', '@0000000c : ffffffff')
+
+def add_addr(cmd):
+    addr = cmd[1]
+    return [cmd[0], addr & 0xFF, (addr >> 8) & 0xFF, (addr >> 16) & 0xFF, (addr >> 24) & 0xFF]
+
 def download_firmware(dfu, data):
     """ Download new firmware binary to the radio. """
     addresses = [
-        0x0800c000,
-        0x08010000,
-        0x08020000,
-        0x08040000,
-        0x08060000,
-        0x08080000,
-        0x080a0000,
-        0x080c0000,
-        0x080e0000]
-    sizes = [0x4000,  # 0c
-             0x10000,  # 1
-             0x20000,  # 2
-             0x20000,  # 4
-             0x20000,  # 6
-             0x20000,  # 8
-             0x20000,  # a
-             0x20000,  # c
-             0x20000]  # e
+        0x0800c000, 0x08010000, 0x08020000, 0x08040000,
+        0x08060000, 0x08080000, 0x080a0000, 0x080c0000, 0x080e0000]
+    sizes = [0x4000, 0x10000, 0x20000, 0x20000, 0x20000,
+             0x20000, 0x20000, 0x20000, 0x20000]
     block_ends = [0x11, 0x41, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81]
     try:
-        # Are we in the right mode?
         mfg = dfu.get_string(1)
-        if mfg != u'AnyRoad Technology':
-            print("""ERROR: You forgot to enter the bootloader.
-Please hold PTT and the button above it while rebooting.  You
-should see the LED blinking green and red, and then your
-radio will be radio to accept this firmware update.""")
+        if mfg not in BOOTLOADER_STRINGS:
+            print("ERROR: You forgot to enter the bootloader.")
             sys.exit(1)
 
         print("Beginning firmware upgrade.")
-        sys.stdout.flush() # let text appear immediately (for mingw)
-        status, timeout, state, discarded = dfu.get_status()
-        assert state == State.dfuIDLE
+        sys.stdout.flush()
+        dfu.get_status()
 
-        dfu.md380_custom(0x91, 0x01)
-        dfu.md380_custom(0x91, 0x31)
+        # Chain commands from dfuDNLOAD_IDLE without ABORT
+        # to preserve bootloader XOR mode across the session
+        if not dfu.dnload_chain([0x91, 0x01]):
+            print("Failed to enter programming mode")
+            return False
+        if not dfu.dnload_chain([0x91, 0x31]):
+            print("Failed to set programming mode param")
+            return False
 
         for address in addresses:
             if dfu.verbose:
                 print("Erasing address@ 0x%x" % address)
                 sys.stdout.flush()
-            dfu.erase_block(address)
+            if not dfu.dnload_chain(add_addr([0x41, address])):
+                print("Failed to erase 0x%x" % address)
+                return False
 
         block_size = 1024
         block_start = 2
         address_idx = 0
 
-        if data[0:14] == "OutSecurityBin":  # skip header if present
+        if data[0:14] == b"OutSecurityBin":
             if dfu.verbose:
                 print("Skipping 0x100 byte header in data file")
-            header, data = data[:0x100], data[0x100:]
+            data = data[0x100:]
 
         print("Writing firmware:")
 
-        assert len(addresses) == len(sizes)
         numaddresses = len(addresses)
 
-        while address_idx < numaddresses:  # for each section
+        while address_idx < numaddresses:
             print("%0d%% complete" % (address_idx * 100 / numaddresses))
-            sys.stdout.flush() # let text appear immediately (for mingw)
+            sys.stdout.flush()
             address = addresses[address_idx]
             size = sizes[address_idx]
-            dfu.set_address(address)
+            if not dfu.dnload_chain(add_addr([0x21, address])):
+                print("Failed to set address 0x%x" % address)
+                return False
 
             if address_idx != len(addresses) - 1:
                 assert address + size == addresses[address_idx + 1]
@@ -263,20 +259,16 @@ radio will be radio to accept this firmware update.""")
             datawritten = 0
             block_number = block_start
 
-            while len(data) > 0 and size > datawritten:  # for each block
+            while len(data) > 0 and size > datawritten:
                 assert block_number <= block_ends[address_idx]
                 packet, data = data[:block_size], data[block_size:]
-
                 if len(packet) < block_size:
-                    packet += '\xFF' * (block_size - len(packet))
-
-                dfu.download(block_number, packet)
-                dfu.wait_till_ready()
-
+                    packet += b'\xff' * (block_size - len(packet))
+                if not dfu.dnload_chain(packet, block_number):
+                    print("Failed to write block %d" % block_number)
+                    return False
                 datawritten += len(packet)
                 block_number += 1
-                # if dfu.verbose: sys.stdout.write('.'); sys.stdout.flush()
-            # if dfu.verbose: sys.stdout.write('_\n'); sys.stdout.flush()
             address_idx += 1
         print("100% complete, now safe to disconnect and/or reboot radio")
         return True
@@ -357,75 +349,54 @@ def init_dfu(alt=0):
     return dfu
 
 def auto_upgrade(firmware_data):
-    print("Beginning firmware auto_upgrade. This supports forcing a fully-booted radio into the bootloader, if it has a recent experimental firmware.\n"
-    "Stock firmware and older experimental firmware will still require the usual buttons (PTT+button above) held during power-on.\n"
-    )
+    print("Beginning firmware auto_upgrade.\n")
     errors = []
     dfu = init_dfu()
     mfg = dfu.get_string(1)
-    if mfg != u'AnyRoad Technology':
+    if mfg not in BOOTLOADER_STRINGS:
         print("Radio not in bootloader: attempting automatic reboot into bootloader")
         try:
-            dfu.wait_till_ready() #make sure it's safe to reboot radio
             del dfu
-        except usb.core.USBError as e:
-            #we expect a pipe error here (errno 32)
-            #or an input/output error (errno 5)
-            # print("detach dfu")
-            if e.errno not in [5,32]:
-                print(e)
-                errors.append(e)
+        except usb.core.USBError:
+            pass
         time.sleep(1)
         try:
-            tooldfu = md380_tool.init_dfu() #prepare to and then reboot radio
+            tooldfu = md380_tool.init_dfu()
             tooldfu.reboot_to_bootloader()
             del tooldfu
         except usb.core.USBError as e:
-            #we expect a pipe error here (errno 32)
-            #or an input/output error (errno 5)
-            print("tooldfu")
-            if e.errno not in  [5,32]: 
+            if e.errno not in [5, 32]:
                 print(e)
                 errors.append(e)
         print("Waiting 10 seconds for bootloader")
-        time.sleep(10) #wait for bootloader to be ready
-        status = None
-        while status != Status.OK: #stay here until bootloader actually ready
-            print("Checking bootloader is okay:")
+        time.sleep(10)
+        for _ in range(20):
             try:
                 dfu = init_dfu()
-                status = dfu.get_status()[0]
-            except usb.core.USBError as e:
-                #busy device is okay here, but the time.sleep should be enough to handle that
-                print(e)
-                status = None
-            time.sleep(.5)
+                if dfu.get_status()[0] == Status.OK:
+                    break
+            except usb.core.USBError:
+                pass
+            time.sleep(0.5)
     else:
-        print("Radio is already in bootloader, or we can't tell (old firmware versions can do this sometimes)")
-        print("If this fails, boot the radio into the bootloader yourself (You've succeeded when the status light flashes between red and green) and try again")
-    result = download_firmware(dfu, firmware_data)
-    if result is True:
-        errors = []
-    dfu.wait_till_ready()
+        print("Radio is in bootloader mode.")
 
-    #now we boot the full application
-    try:
-        del dfu
-    except usb.core.USBError as e:
-        if e.errno not in [5,32]: 
-            print("detach bootloader dfu")
-            print(e)
-            errors.append(e)
-    time.sleep(1)
-    try:
-        stm32dfu = stm32_dfu.init_dfu()
-        stm32dfu.go() #has a default address that works
-        del stm32dfu
-    except usb.core.USBError as e:
-        if e.errno not in [5,32]: 
-            print("stm32dfu go")
-            print(e)
-            errors.append(e)
+    result = download_firmware(dfu, firmware_data)
+    if result:
+        errors = []
+        # Signal end-of-download, then reboot
+        try:
+            dfu._device.ctrl_transfer(0x21, 1, 0, 0, None)
+            dfu.get_status()
+            time.sleep(0.5)
+            dfu._device.ctrl_transfer(0x21, 1, 0, 0, bytes([0x91, 0x05]))
+            try:
+                dfu.get_status()
+            except usb.core.USBError:
+                pass
+            print("Radio rebooting into application...")
+        except Exception as e:
+            print("Failed to reboot:", e)
     return errors
 
 def usage():
@@ -480,10 +451,9 @@ def main():
                 upload_bootloader(dfu, sys.argv[2])
 
             elif sys.argv[1] == "upgrade":
-                dfu = init_dfu()
                 with open(sys.argv[2], 'rb') as f:
                     data = f.read()
-                    result = download_firmware(dfu, data)
+                    auto_upgrade(data)
 
             elif sys.argv[1] == "auto-upgrade":
                 with open(sys.argv[2], 'rb') as f:

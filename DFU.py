@@ -17,6 +17,9 @@ class Enumeration(object):
     def __int__(self):
         return self.id
 
+    def __index__(self):
+        return self.id
+
     def __repr__(self):
         return self.name
 
@@ -145,9 +148,9 @@ class DFU(object):
                 exit()
         else:
             time_to_set = datetime.now()
-        dt = datetime.strftime(time_to_set, '%Y%m%d%H%M%S').decode("hex")
+        dt = bytes.fromhex(datetime.strftime(time_to_set, '%Y%m%d%H%M%S'))
         self.md380_custom(0x91, 0x02)
-        self.download(0, "\xb5" + dt)
+        self.download(0, b"\xb5" + dt)
         self.wait_till_ready()
         self.md380_reboot()
 
@@ -254,6 +257,20 @@ class DFU(object):
 
     def abort(self):
         self._device.ctrl_transfer(0x21, Request.ABORT, 0, 0, None)
+
+    def wait_till_ready_dnload(self):
+        for _ in range(30):
+            status, timeout, state, discarded = self.get_status()
+            if state == State.dfuDNLOAD_IDLE:
+                return True
+            if state == State.dfuERROR:
+                self.clear_status()
+                return False
+        return False
+
+    def dnload_chain(self, data, block=0):
+        self._device.ctrl_transfer(0x21, Request.DNLOAD, block, 0, bytes(data))
+        return self.wait_till_ready_dnload()
 
     def wait_till_ready(self, desired_state=State.dfuIDLE):
         state = 11

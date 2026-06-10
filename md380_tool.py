@@ -287,7 +287,7 @@ class Tool(DFU):
         so you must reprogram the firmware afterwards if you'd like a working radio.
         """
         cmd = 0x86  # reboot_to_bootloader
-        self._device.ctrl_transfer(0x21, Request.DNLOAD, 1, 0, chr(cmd))
+        self._device.ctrl_transfer(0x21, Request.DNLOAD, 1, 0, bytes([cmd]))
         self.get_status()  # this changes state
 
     def getdmesg(self):

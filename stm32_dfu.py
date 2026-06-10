@@ -331,7 +331,7 @@ def download(dfu, data, flash_address):
             packet, data = data[:block_size], data[block_size:]
             if len(packet) < block_size:
                 print("Padding a short packet.")
-                packet += '\xFF' * (block_size - len(packet))
+                packet += b'\xff' * (block_size - len(packet))
             # print "Downloading block %i." % block_number;
             dfu.download(block_number, packet)
 
